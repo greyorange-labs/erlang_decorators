@@ -20,7 +20,7 @@ pretty_print(Ast) -> lists:flatten([erl_pp:form(N) || N <- Ast]).
 emit_errors_for_rogue_decorators(DecoratorList) ->
     [
         {error, {Line, erl_parse, ["rogue decorator ", io_lib:format("~p", [D])]}}
-     || {attribute, Line, Dec, D} <- DecoratorList, Dec =:= decorate orelse Dec =:= mod_decorate
+     || {attribute, Line, decorate, D} <- DecoratorList
     ].
 
 %% transforms module level nodes
@@ -32,6 +32,15 @@ transform_node(Node = {attribute, _Line, mod_decorate, _Decorator}, DecoratorLis
     %% keep a list of module level decorators but dont emit them in the code.
     %% this is important as you arent meant to have attributes after functions in a module
     {nil, [Node | DecoratorList]};
+transform_node(Node = {attribute, _Line, group_decorator, _Decorator}, DecoratorList) ->
+    %% keep a list of group_decorator level decorators but dont emit them in the code.
+    {nil, [Node | DecoratorList]};
+transform_node(Node = {attribute, _Line, export, ExportedFuns}, [
+    {attribute, _Line0, group_decorator, _Decorator} = DecNode | DecoratorList
+]) ->
+    %% keep a list of group_decorator level decorators but dont emit them in the code.
+    GroupDecorators = [{group_decorator, {Fun, Arity}, DecNode} || {Fun, Arity} <- ExportedFuns],
+    {Node, GroupDecorators ++ DecoratorList};
 transform_node(Node = {attribute, _Line, decorate, _Decorator}, DecoratorList) ->
     %% keep a list of decorators but dont emit them in the code.
     %% this is important as you arent meant to have attributes after functions in a module
@@ -39,19 +48,36 @@ transform_node(Node = {attribute, _Line, decorate, _Decorator}, DecoratorList) -
 transform_node(Node = {function, _Line, _FuncName, _Arity, _Clauses}, []) ->
     %% pass through decoratorless functions
     {Node, []};
-transform_node(Node = {function, _Line, _FuncName, _Arity, _Clauses}, DecoratorList) ->
-    %% apply decorators to this function and reset decorator list (keep only module level decorators)
-    ModDecorators = [
-        ModDecNode
-     || ModDecNode = {attribute, _Line0, mod_decorate, _Decorator} <- DecoratorList
-    ],
-    {apply_decorators(Node, DecoratorList), ModDecorators};
+transform_node(Node = {function, _Line, FuncName, Arity, _Clauses}, DecoratorList) ->
+    %% Apply decorators to this function and Remove function level decorators
+    AccDecoratorList =
+        lists:filter(
+            fun
+                ({attribute, _Line0, decorate, _Decorator}) -> false;
+                (_ModOrgroup) -> true
+            end,
+            DecoratorList
+        ),
+    DecoratorListForThisFunction =
+        lists:filtermap(
+            fun
+                ({group_decorator, {FunName0, Arity0}, Decorator}) ->
+                    case {FunName0, Arity0} of
+                        {FuncName, Arity} -> {true, Decorator};
+                        _ -> false
+                    end;
+                (Decorator) ->
+                    {true, Decorator}
+            end,
+            DecoratorList
+        ),
+    {apply_decorators(Node, DecoratorListForThisFunction), AccDecoratorList};
 transform_node(Node = {eof, _Line}, DecoratorList) ->
     DecoratorList0 = [
         Node0
-     || Node0 = {attribute, _Line0, Dec, _Decorator} <- DecoratorList, Dec =/= mod_decorate
+     || Node0 = {attribute, _Line0, decorate, _Decorator} <- DecoratorList
     ],
-    {[Node | DecoratorList0], []};
+    {[Node | emit_errors_for_rogue_decorators(DecoratorList0)], []};
 transform_node(Node, DecoratorList) ->
     %% some other form (only other valid forms are other attributes)
     %% keep going
@@ -92,7 +118,7 @@ function_forms_decorator_chain(Line, FuncName, Arity, DecoratorList) ->
     [
         function_form_decorator_chain(Line, FuncName, Arity, D, I)
      || {{attribute, _, Dec, D}, I} <- DecoratorIndexes,
-        Dec =:= decorate orelse Dec =:= mod_decorate
+        Dec =:= decorate orelse Dec =:= mod_decorate orelse Dec =:= group_decorator
     ].
 
 function_form_decorator_chain(Line, FuncName, Arity, Decorator, DecoratorIndex) ->
