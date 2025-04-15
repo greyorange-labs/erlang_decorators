@@ -1,0 +1,36 @@
+# Erlang build artifacts
+*.beam
+*.app
+*.appup
+*.script
+*.boot
+*.rel
+*.dump
+*.ez
+*.d
+_rebuilds/
+ebin/
+priv/
+/cover/
+.reltool*
+._*swp
+*~
+
+# Dialyzer
+.plt
+.erlang.cookie
+erl_crash.dump
+
+# Rebar3 specific
+_build/
+.rebar/
+.rebar3/
+deps/
+
+# IDE/Editor files
+.idea/
+*.swp
+*.swo
+.DS_Store
+.vscode/
+
