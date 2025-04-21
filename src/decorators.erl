@@ -71,7 +71,14 @@ transform_node(Node = {function, _Line, FuncName, Arity, _Clauses}, DecoratorLis
             end,
             DecoratorList
         ),
-    {apply_decorators(Node, DecoratorListForThisFunction), AccDecoratorList};
+    case DecoratorListForThisFunction of
+        [] ->
+            %% no decorators for this function
+            {Node, AccDecoratorList};
+        _ ->
+            %% apply decorators to this function
+            {apply_decorators(Node, DecoratorListForThisFunction), AccDecoratorList}
+    end;
 transform_node(Node = {eof, _Line}, DecoratorList) ->
     DecoratorList0 = [
         Node0
