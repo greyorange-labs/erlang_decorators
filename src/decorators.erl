@@ -162,27 +162,63 @@ emit_decorated_fun(Line, DecFun, InnerFunName, ArgNames, OriginalFuncName, Origi
 emit_decorated_fun(Line, {DecMod, DecFun, DecData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName) when
     is_list(DecData)
 ->
-    Arity = length(ArgNames),
-    EnhancedDecData = [{orig_mfa, {ModuleName, OriginalFuncName, OriginalArity}} | DecData],
-    {call, Line, {remote, Line, {atom, Line, DecMod}, {atom, Line, DecFun}}, [
-        {'fun', Line, {function, InnerFunName, Arity}},
-        emit_var_list(Line, ArgNames),
-        erl_parse:abstract(EnhancedDecData)
-    ]};
+    case validate_decorator_data(Line, DecData) of
+        {ok, ValidatedData} ->
+            Arity = length(ArgNames),
+            EnhancedDecData = [{orig_mfa, {ModuleName, OriginalFuncName, OriginalArity}} | ValidatedData],
+            {call, Line, {remote, Line, {atom, Line, DecMod}, {atom, Line, DecFun}}, [
+                {'fun', Line, {function, InnerFunName, Arity}},
+                emit_var_list(Line, ArgNames),
+                erl_parse:abstract(EnhancedDecData)
+            ]};
+        {error, ErrorData} ->
+            throw(ErrorData)
+    end;
 emit_decorated_fun(Line, {DecFun, DecData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName) when
     is_list(DecData)
 ->
-    Arity = length(ArgNames),
-    EnhancedDecData = [{orig_mfa, {ModuleName, OriginalFuncName, OriginalArity}} | DecData],
-    ArgList = [
-        {'fun', Line, {function, InnerFunName, Arity}},
-        emit_var_list(Line, ArgNames),
-        erl_parse:abstract(EnhancedDecData)
-    ],
-    emit_local_call(Line, DecFun, ArgList).
+    case validate_decorator_data(Line, DecData) of
+        {ok, ValidatedData} ->
+            Arity = length(ArgNames),
+            EnhancedDecData = [{orig_mfa, {ModuleName, OriginalFuncName, OriginalArity}} | ValidatedData],
+            ArgList = [
+                {'fun', Line, {function, InnerFunName, Arity}},
+                emit_var_list(Line, ArgNames),
+                erl_parse:abstract(EnhancedDecData)
+            ],
+            emit_local_call(Line, DecFun, ArgList);
+        {error, ErrorData} ->
+            throw(ErrorData)
+    end.
 
 emit_local_call(Line, FuncName, ArgList) ->
     {call, Line, {atom, Line, FuncName}, ArgList}.
+
+%% Validates that DecData is a strict proplist
+%% A strict proplist is a list of {Key, Value} tuples (Key can be any term)
+%% Empty list is acceptable
+-spec is_proplist_strict(term()) -> boolean().
+is_proplist_strict([]) ->
+    true;
+is_proplist_strict([{_Key, _Value} | Rest]) ->
+    is_proplist_strict(Rest);
+is_proplist_strict(_) ->
+    false.
+
+%% Validates DecData during AST transformation
+%% Returns {ok, DecData} if valid, {error, Reason} if invalid
+validate_decorator_data(Line, DecData) when is_list(DecData) ->
+    case is_proplist_strict(DecData) of
+        true -> {ok, DecData};
+        false ->
+            {error, {Line, invalid_decorator_options,
+                     ["Decorator data must be a proplist (list of {Key, Value} tuples), got: ",
+                      io_lib:format("~p", [DecData])]}}
+    end;
+validate_decorator_data(Line, DecData) ->
+    {error, {Line, invalid_decorator_options,
+             ["Decorator data must be a list (proplist), got: ",
+              io_lib:format("~p", [DecData])]}}.
 
 emit_arguments(Line, AtomList) ->
     [{var, Line, Arg} || Arg <- AtomList].
@@ -395,3 +431,68 @@ emit_decorated_fun_preserves_order_with_decdata_test() ->
             }
         }
     } = AbstractData.
+
+%% Tests for proplist validation
+is_proplist_strict_test_() ->
+    [
+        ?_assert(is_proplist_strict([])),
+        ?_assert(is_proplist_strict([{key, value}])),
+        ?_assert(is_proplist_strict([{key1, value1}, {key2, value2}])),
+        ?_assert(is_proplist_strict([{1, value}])),
+        ?_assert(is_proplist_strict([{key, value}, {another, 123}, {"string_key", data}])),
+        ?_assertNot(is_proplist_strict([{key, value, extra}])),
+        ?_assertNot(is_proplist_strict([atom_key])),
+        ?_assertNot(is_proplist_strict(["string", "list"])),
+        ?_assertNot(is_proplist_strict(123)),
+        ?_assertNot(is_proplist_strict(not_a_list))
+    ].
+
+validate_decorator_data_valid_proplist_test() ->
+    Line = 10,
+    ValidData = [{option, value}, {another_option, 42}],
+    {ok, Result} = validate_decorator_data(Line, ValidData),
+    ?assertEqual(ValidData, Result).
+
+validate_decorator_data_empty_list_test() ->
+    Line = 10,
+    {ok, Result} = validate_decorator_data(Line, []),
+    ?assertEqual([], Result).
+
+validate_decorator_data_atom_list_test() ->
+    Line = 10,
+    ValidData = [{option1, value1}, {option2, value2}, {option3, value3}],
+    {ok, Result} = validate_decorator_data(Line, ValidData),
+    ?assertEqual(ValidData, Result).
+
+validate_decorator_data_invalid_test() ->
+    Line = 15,
+    InvalidData = [{key, value, extra}],
+    {error, {RetLine, RetError, _RetMsg}} = validate_decorator_data(Line, InvalidData),
+    ?assertEqual(Line, RetLine),
+    ?assertEqual(invalid_decorator_options, RetError).
+
+validate_decorator_data_not_list_test() ->
+    Line = 20,
+    InvalidData = not_a_list,
+    {error, {RetLine, RetError, _RetMsg}} = validate_decorator_data(Line, InvalidData),
+    ?assertEqual(Line, RetLine),
+    ?assertEqual(invalid_decorator_options, RetError).
+
+emit_decorated_fun_validates_data_test() ->
+    Line = 10,
+    InnerFunName = func_original___,
+    ArgNames = ['Arg1'],
+    OriginalFuncName = func,
+    OriginalArity = 1,
+    ModuleName = testmod,
+
+    % Valid data should succeed
+    ValidData = [{option, value}],
+    Result = emit_decorated_fun(Line, {my_dec, my_fun, ValidData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName),
+    ?assertMatch({call, _, _, _}, Result),
+
+    % Invalid data should throw
+    InvalidData = [{key, value, extra}],
+    ?assertThrow({_, invalid_decorator_options, _},
+        emit_decorated_fun(Line, {my_dec, my_fun, InvalidData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName)
+    ).
