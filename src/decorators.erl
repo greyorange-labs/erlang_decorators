@@ -7,7 +7,8 @@
 parse_transform(Ast, _Options) ->
     % io:format("~nAst: ~p~n=======~n", [Ast]),
     % io:format("~nPretty Ast: ~s~n=======~n", [pretty_print(Ast)]),
-    {ExtendedAst2, RogueDecorators} = lists:mapfoldl(fun transform_node/2, [], Ast),
+    ModuleName = extract_module_name(Ast),
+    {ExtendedAst2, RogueDecorators} = lists:mapfoldl(fun(Node, Acc) -> transform_node(Node, Acc, ModuleName) end, [], Ast),
     Ast2 =
         lists:flatten(lists:filter(fun(Node) -> Node =/= nil end, ExtendedAst2)) ++
             emit_errors_for_rogue_decorators(RogueDecorators),
@@ -16,6 +17,12 @@ parse_transform(Ast, _Options) ->
     Ast2.
 
 pretty_print(Ast) -> lists:flatten([erl_pp:form(N) || N <- Ast]).
+
+extract_module_name(Ast) ->
+    case lists:keyfind(module, 3, Ast) of
+        {attribute, _Line, module, ModuleName} -> ModuleName;
+        false -> undefined
+    end.
 
 emit_errors_for_rogue_decorators(DecoratorList) ->
     [
@@ -28,27 +35,27 @@ emit_errors_for_rogue_decorators(DecoratorList) ->
 %% outputs nil (to swallow the node), a single node, or a list of nodes.
 %% nil nodes are removed in a subsequent pass and the lists flattened
 
-transform_node(Node = {attribute, _Line, mod_decorate, _Decorator}, DecoratorList) ->
+transform_node(Node = {attribute, _Line, mod_decorate, _Decorator}, DecoratorList, _ModuleName) ->
     %% keep a list of module level decorators but dont emit them in the code.
     %% this is important as you arent meant to have attributes after functions in a module
     {nil, [Node | DecoratorList]};
-transform_node(Node = {attribute, _Line, group_decorator, _Decorator}, DecoratorList) ->
+transform_node(Node = {attribute, _Line, group_decorator, _Decorator}, DecoratorList, _ModuleName) ->
     %% keep a list of group_decorator level decorators but dont emit them in the code.
     {nil, [Node | DecoratorList]};
 transform_node(Node = {attribute, _Line, export, ExportedFuns}, [
     {attribute, _Line0, group_decorator, _Decorator} = DecNode | DecoratorList
-]) ->
+], _ModuleName) ->
     %% keep a list of group_decorator level decorators but dont emit them in the code.
     GroupDecorators = [{group_decorator, {Fun, Arity}, DecNode} || {Fun, Arity} <- ExportedFuns],
     {Node, GroupDecorators ++ DecoratorList};
-transform_node(Node = {attribute, _Line, decorate, _Decorator}, DecoratorList) ->
+transform_node(Node = {attribute, _Line, decorate, _Decorator}, DecoratorList, _ModuleName) ->
     %% keep a list of decorators but dont emit them in the code.
     %% this is important as you arent meant to have attributes after functions in a module
     {nil, [Node | DecoratorList]};
-transform_node(Node = {function, _Line, _FuncName, _Arity, _Clauses}, []) ->
+transform_node(Node = {function, _Line, _FuncName, _Arity, _Clauses}, [], _ModuleName) ->
     %% pass through decoratorless functions
     {Node, []};
-transform_node(Node = {function, _Line, FuncName, Arity, _Clauses}, DecoratorList) ->
+transform_node(Node = {function, _Line, FuncName, Arity, _Clauses}, DecoratorList, ModuleName) ->
     %% Apply decorators to this function and Remove function level decorators
     AccDecoratorList =
         lists:filter(
@@ -77,20 +84,20 @@ transform_node(Node = {function, _Line, FuncName, Arity, _Clauses}, DecoratorLis
             {Node, AccDecoratorList};
         _ ->
             %% apply decorators to this function
-            {apply_decorators(Node, DecoratorListForThisFunction), AccDecoratorList}
+            {apply_decorators(Node, DecoratorListForThisFunction, ModuleName), AccDecoratorList}
     end;
-transform_node(Node = {eof, _Line}, DecoratorList) ->
+transform_node(Node = {eof, _Line}, DecoratorList, _ModuleName) ->
     DecoratorList0 = [
         Node0
      || Node0 = {attribute, _Line0, decorate, _Decorator} <- DecoratorList
     ],
     {[Node | emit_errors_for_rogue_decorators(DecoratorList0)], []};
-transform_node(Node, DecoratorList) ->
+transform_node(Node, DecoratorList, _ModuleName) ->
     %% some other form (only other valid forms are other attributes)
     %% keep going
     {Node, DecoratorList}.
 
-apply_decorators(Node = {function, Line, FuncName, Arity, _Clauses}, DecoratorList) when
+apply_decorators(Node = {function, Line, FuncName, Arity, _Clauses}, DecoratorList, ModuleName) when
     length(DecoratorList) > 0
 ->
     [
@@ -99,7 +106,7 @@ apply_decorators(Node = {function, Line, FuncName, Arity, _Clauses}, DecoratorLi
         %% output a trampoline into our decorator chain
         function_form_trampoline(Line, FuncName, Arity, DecoratorList)
         %% output our decorator chain
-        | function_forms_decorator_chain(Line, FuncName, Arity, DecoratorList)
+        | function_forms_decorator_chain(Line, FuncName, Arity, DecoratorList, ModuleName)
     ].
 
 function_form_original({function, Line, FuncName, Arity, Clauses}) ->
@@ -119,16 +126,16 @@ function_form_trampoline(Line, FuncName, Arity, DecoratorList) ->
         ]}
     ]}.
 
-function_forms_decorator_chain(Line, FuncName, Arity, DecoratorList) ->
+function_forms_decorator_chain(Line, FuncName, Arity, DecoratorList, ModuleName) ->
     NumDecorators = length(DecoratorList),
     DecoratorIndexes = lists:zip(DecoratorList, lists:seq(1, NumDecorators)),
     [
-        function_form_decorator_chain(Line, FuncName, Arity, D, I)
+        function_form_decorator_chain(Line, FuncName, Arity, D, I, ModuleName)
      || {{attribute, _, Dec, D}, I} <- DecoratorIndexes,
         Dec =:= decorate orelse Dec =:= mod_decorate orelse Dec =:= group_decorator
     ].
 
-function_form_decorator_chain(Line, FuncName, Arity, Decorator, DecoratorIndex) ->
+function_form_decorator_chain(Line, FuncName, Arity, Decorator, DecoratorIndex, ModuleName) ->
     ArgNames = arg_names(Arity),
     NextFuncName =
         case DecoratorIndex - 1 of
@@ -140,35 +147,37 @@ function_form_decorator_chain(Line, FuncName, Arity, Decorator, DecoratorIndex) 
     {function, Line, generated_func_name({decorator_wrapper, FuncName, DecoratorIndex}), Arity, [
         {clause, Line, emit_arguments(Line, ArgNames), emit_guards(Line, []), [
             %% DecMod:Decfun(fun NextFun/1, [Arg1, Arg2, ...]).
-            emit_decorated_fun(Line, Decorator, NextFuncName, ArgNames)
+            emit_decorated_fun(Line, Decorator, NextFuncName, ArgNames, FuncName, Arity, ModuleName)
         ]}
     ]}.
 
-emit_decorated_fun(Line, {DecMod, DecFun}, InnerFunName, ArgNames) when
+emit_decorated_fun(Line, {DecMod, DecFun}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName) when
     is_atom(DecMod), is_atom(DecFun)
 ->
-    emit_decorated_fun(Line, {DecMod, DecFun, []}, InnerFunName, ArgNames);
-emit_decorated_fun(Line, DecFun, InnerFunName, ArgNames) when
+    emit_decorated_fun(Line, {DecMod, DecFun, []}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName);
+emit_decorated_fun(Line, DecFun, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName) when
     is_atom(DecFun)
 ->
-    emit_decorated_fun(Line, {DecFun, []}, InnerFunName, ArgNames);
-emit_decorated_fun(Line, {DecMod, DecFun, DecData}, InnerFunName, ArgNames) when
+    emit_decorated_fun(Line, {DecFun, []}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName);
+emit_decorated_fun(Line, {DecMod, DecFun, DecData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName) when
     is_list(DecData)
 ->
     Arity = length(ArgNames),
+    EnhancedDecData = [{orig_mfa, {ModuleName, OriginalFuncName, OriginalArity}} | DecData],
     {call, Line, {remote, Line, {atom, Line, DecMod}, {atom, Line, DecFun}}, [
         {'fun', Line, {function, InnerFunName, Arity}},
         emit_var_list(Line, ArgNames),
-        erl_parse:abstract(DecData)
+        erl_parse:abstract(EnhancedDecData)
     ]};
-emit_decorated_fun(Line, {DecFun, DecData}, InnerFunName, ArgNames) when
+emit_decorated_fun(Line, {DecFun, DecData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName) when
     is_list(DecData)
 ->
     Arity = length(ArgNames),
+    EnhancedDecData = [{orig_mfa, {ModuleName, OriginalFuncName, OriginalArity}} | DecData],
     ArgList = [
         {'fun', Line, {function, InnerFunName, Arity}},
         emit_var_list(Line, ArgNames),
-        erl_parse:abstract(DecData)
+        erl_parse:abstract(EnhancedDecData)
     ],
     emit_local_call(Line, DecFun, ArgList).
 
@@ -283,3 +292,106 @@ args_to_list_form_of_args_test() ->
         {cons, Line, {var, Line, 'Arg1'}, {cons, Line, {var, Line, 'Arg2'}, {nil, Line}}},
         emit_var_list(Line, ['Arg1', 'Arg2'])
     ).
+
+%% Tests for orig_mfa enhancement
+extract_module_name_test_() ->
+    [
+        ?_assertEqual(mymod, extract_module_name([
+            {attribute, 1, module, mymod}
+        ])),
+        ?_assertEqual(another_module, extract_module_name([
+            {attribute, 1, module, another_module},
+            {attribute, 2, export, [{foo, 1}]}
+        ])),
+        ?_assertEqual(undefined, extract_module_name([
+            {attribute, 1, export, [{foo, 1}]}
+        ]))
+    ].
+
+emit_decorated_fun_with_external_decorator_test() ->
+    Line = 10,
+    InnerFunName = my_func_original___,
+    ArgNames = ['Arg1', 'Arg2'],
+    OriginalFuncName = my_func,
+    OriginalArity = 2,
+    ModuleName = mymod,
+
+    Result = emit_decorated_fun(Line, {mydecorator, my_decorator_fun}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName),
+
+    % Extract the abstract form to verify orig_mfa was added
+    {call, Line, {remote, Line, {atom, Line, mydecorator}, {atom, Line, my_decorator_fun}},
+        [{'fun', Line, {function, InnerFunName, 2}}, _VarList, AbstractData]} = Result,
+
+    % Verify the abstract form contains orig_mfa tuple
+    {cons, _, {tuple, _, [{atom, _, orig_mfa}, {tuple, _, [{atom, _, mymod}, {atom, _, my_func}, {integer, _, 2}]}]}, {nil, _}} = AbstractData.
+
+emit_decorated_fun_with_local_decorator_test() ->
+    Line = 15,
+    InnerFunName = another_func_original___,
+    ArgNames = ['Arg1'],
+    OriginalFuncName = another_func,
+    OriginalArity = 1,
+    ModuleName = testmod,
+
+    Result = emit_decorated_fun(Line, my_local_decorator, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName),
+
+    % Extract the abstract form to verify orig_mfa was added
+    {call, Line, {atom, Line, my_local_decorator},
+        [{'fun', Line, {function, InnerFunName, 1}}, _VarList, AbstractData]} = Result,
+
+    % Verify the abstract form contains orig_mfa tuple
+    {cons, _, {tuple, _, [{atom, _, orig_mfa}, {tuple, _, [{atom, _, testmod}, {atom, _, another_func}, {integer, _, 1}]}]}, {nil, _}} = AbstractData.
+
+emit_decorated_fun_with_existing_decdata_test() ->
+    Line = 20,
+    InnerFunName = func_original___,
+    ArgNames = ['Arg1', 'Arg2', 'Arg3'],
+    OriginalFuncName = func,
+    OriginalArity = 3,
+    ModuleName = testmod2,
+    ExistingDecData = [{custom_key, custom_value}, {another_key, 42}],
+
+    Result = emit_decorated_fun(Line, {mydecorator, my_decorator_fun, ExistingDecData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName),
+
+    % Extract the abstract form to verify orig_mfa was prepended
+    {call, Line, {remote, Line, {atom, Line, mydecorator}, {atom, Line, my_decorator_fun}},
+        [{'fun', Line, {function, InnerFunName, 3}}, _VarList, AbstractData]} = Result,
+
+    % Verify the abstract form starts with orig_mfa tuple, followed by other data
+    {cons, _,
+        {tuple, _, [{atom, _, orig_mfa}, {tuple, _, [{atom, _, testmod2}, {atom, _, func}, {integer, _, 3}]}]},
+        {cons, _,
+            {tuple, _, [{atom, _, custom_key}, {atom, _, custom_value}]},
+            {cons, _,
+                {tuple, _, [{atom, _, another_key}, {integer, _, 42}]},
+                {nil, _}
+            }
+        }
+    } = AbstractData.
+
+emit_decorated_fun_preserves_order_with_decdata_test() ->
+    Line = 25,
+    InnerFunName = func_original___,
+    ArgNames = ['X', 'Y'],
+    OriginalFuncName = func,
+    OriginalArity = 2,
+    ModuleName = mymodule,
+    ExistingDecData = [{first, 1}, {second, 2}],
+
+    Result = emit_decorated_fun(Line, {some_decorator, ExistingDecData}, InnerFunName, ArgNames, OriginalFuncName, OriginalArity, ModuleName),
+
+    % Extract the abstract form to verify order
+    {call, Line, {atom, Line, some_decorator},
+        [{'fun', Line, {function, InnerFunName, 2}}, _VarList, AbstractData]} = Result,
+
+    % Verify structure: orig_mfa first, then other items
+    {cons, _,
+        {tuple, _, [{atom, _, orig_mfa}, {tuple, _, [{atom, _, mymodule}, {atom, _, func}, {integer, _, 2}]}]},
+        {cons, _,
+            {tuple, _, [{atom, _, first}, {integer, _, 1}]},
+            {cons, _,
+                {tuple, _, [{atom, _, second}, {integer, _, 2}]},
+                {nil, _}
+            }
+        }
+    } = AbstractData.

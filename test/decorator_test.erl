@@ -7,7 +7,8 @@
 
 % example decorator that replaces the return value with the atom 'replaced'
 % note that we always pass the arguments as a single list to the next fun
-replace_return_value_decorator(F, Args, [])->
+% DecData now includes {orig_mfa, {Module, Function, Arity}} from the transform
+replace_return_value_decorator(F, Args, _DecData)->
     _R = apply(F, Args),
     replaced.
 
@@ -15,7 +16,7 @@ replace_return_value_decorator(F, Args, [])->
 replace_ret_val_decorated() -> ok.
 
 
-replace_args_decorator(F, _Args, [])->
+replace_args_decorator(F, _Args, _DecData)->
     apply(F, [replaced1, replaced2]).
 
 -decorate(replace_args_decorator).
@@ -27,7 +28,10 @@ multiple_decorators(replaced1, replaced2) ->
     ok.
 
 options_decorator(Fun, Args, Options) ->
-    ?assertEqual([{option, value}], Options),
+    % Options now includes {orig_mfa, ...} prepended to the original options
+    % Extract just the option value to verify the decorator options were passed correctly
+    [{orig_mfa, _} | UserOptions] = Options,
+    ?assertEqual([{option, value}], UserOptions),
     apply(Fun, Args).
 
 -decorate({options_decorator, [{option, value}]}).
