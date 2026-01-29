@@ -220,12 +220,13 @@ validate_decorator_data(Line, DecData) ->
 
 %% Formats helpful error messages for invalid decorator data
 format_decorator_data_error(DecData) ->
-    [
+    FormattedData = io_lib:format("~p", [DecData]),
+    lists:flatten([
         "Invalid decorator options: decorator data must be a proplist\n",
         "  A proplist is a list of {Key, Value} tuples (e.g., [{key1, value1}, {key2, value2}])\n",
         "  Empty list [] is acceptable\n",
         "\n",
-        "Got: ", io_lib:format("~p", [DecData]), "\n",
+        "Got: ", FormattedData, "\n",
         "\n",
         "Examples of valid decorator syntax:\n",
         "  -decorate(my_decorator).\n",
@@ -233,7 +234,7 @@ format_decorator_data_error(DecData) ->
         "  -decorate({module, function, []}).\n",
         "  -decorate({module, function, [{option1, value1}, {option2, value2}]}).\n",
         "  -decorate(local_fun, [{debug, true}, {timeout, 5000}])."
-    ].
+    ]).
 
 emit_arguments(Line, AtomList) ->
     [{var, Line, Arg} || Arg <- AtomList].
