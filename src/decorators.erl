@@ -211,14 +211,29 @@ validate_decorator_data(Line, DecData) when is_list(DecData) ->
     case is_proplist_strict(DecData) of
         true -> {ok, DecData};
         false ->
-            {error, {Line, invalid_decorator_options,
-                     ["Decorator data must be a proplist (list of {Key, Value} tuples), got: ",
-                      io_lib:format("~p", [DecData])]}}
+            ErrorMsg = format_decorator_data_error(DecData),
+            {error, {Line, invalid_decorator_options, ErrorMsg}}
     end;
 validate_decorator_data(Line, DecData) ->
-    {error, {Line, invalid_decorator_options,
-             ["Decorator data must be a list (proplist), got: ",
-              io_lib:format("~p", [DecData])]}}.
+    ErrorMsg = format_decorator_data_error(DecData),
+    {error, {Line, invalid_decorator_options, ErrorMsg}}.
+
+%% Formats helpful error messages for invalid decorator data
+format_decorator_data_error(DecData) ->
+    [
+        "Invalid decorator options: decorator data must be a proplist\n",
+        "  A proplist is a list of {Key, Value} tuples (e.g., [{key1, value1}, {key2, value2}])\n",
+        "  Empty list [] is acceptable\n",
+        "\n",
+        "Got: ", io_lib:format("~p", [DecData]), "\n",
+        "\n",
+        "Examples of valid decorator syntax:\n",
+        "  -decorate(my_decorator).\n",
+        "  -decorate({module, function}).\n",
+        "  -decorate({module, function, []}).\n",
+        "  -decorate({module, function, [{option1, value1}, {option2, value2}]}).\n",
+        "  -decorate(local_fun, [{debug, true}, {timeout, 5000}])."
+    ].
 
 emit_arguments(Line, AtomList) ->
     [{var, Line, Arg} || Arg <- AtomList].
